@@ -22,16 +22,26 @@ HEADERS = {
 
 
 class Cache(object):
-    """Holds the last known node IP in memory."""
+    """Holds the last known node IP (and its session) in memory."""
 
-    content = None
     timestamp = None
+    ip_addr = None
+    address = None
+    session = None
 
 
 def node_addr(node=None):
-    """Return a node's full address."""
+    """(re)creates a node's session and returns its full address."""
 
-    return "{}://{}:{}".format(PROTOCOL, node or CLUSTER, PORT)
+    addr = "{}://{}:{}".format(PROTOCOL, node or CLUSTER, PORT)
+
+    if Cache.address != addr:
+        if Cache.session is not None:
+            Cache.session.close()
+        Cache.session = requests.Session()
+
+    Cache.address = addr
+    return Cache.address
 
 
 def node_ip(cache=10):
@@ -46,15 +56,18 @@ def node_ip(cache=10):
 
     now = time.time()
 
-    if cache > 0 and Cache.content and now - Cache.timestamp < cache:
-        return Cache.content
+    if Cache.timestamp and cache > 0 and now - Cache.timestamp < cache:
+        return Cache.ip_addr
 
-    res = requests.get("{}/info".format(node_addr()), timeout=2)
+    info_url = "{}/info".format(node_addr())
+
+    res = Cache.session.get(info_url, timeout=2)
     res.raise_for_status()
-    ipaddr = res.json().get("ip")
-    Cache.content = ipaddr
+
+    Cache.ip_addr = res.json().get("ip")
     Cache.timestamp = now
-    return ipaddr
+
+    return Cache.ip_addr
 
 
 def sub(key, token=None, node=None, timeout=None):
@@ -78,7 +91,7 @@ def sub(key, token=None, node=None, timeout=None):
     else:
         url = "{}/sub/{}?token={}".format(node, key, token)
 
-    res = requests.get(url, timeout=timeout)
+    res = Cache.session.get(url, timeout=timeout)
     res.raise_for_status()
     return res.content
 
@@ -102,5 +115,5 @@ def rep(key, data, token=None, node=None, timeout=None):
     else:
         url = "{}/rep/{}?token={}".format(node, key, token)
 
-    res = requests.post(url, data=data, timeout=timeout)
+    res = Cache.session.post(url, data=data, timeout=timeout)
     res.raise_for_status()
