@@ -39,6 +39,13 @@ def node_addr(node=None):
         if Cache.session is not None:
             Cache.session.close()
         Cache.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            max_retries=3,
+            pool_connections=10,
+            pool_maxsize=100,
+        )
+        Cache.session.mount("http://", adapter)
+        Cache.session.mount("https://", adapter)
 
     Cache.address = addr
     return Cache.address
