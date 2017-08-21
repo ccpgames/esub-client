@@ -20,8 +20,9 @@ setup(
         "Programming Language :: Python :: 3",
     ],
     py_modules=["esub"],
+    entry_points={"console_scripts": ["esub = esub:cli"]},
     long_description=setuphelpers.long_description(),
     cmdclass=setuphelpers.test_command(cover="esub", pdb=True),
     tests_require=["pytest", "pytest-cov", "mock"],
-    install_requires=["requests"],
+    install_requires=["requests", "websockets", "docopt"],
 )
