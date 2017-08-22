@@ -202,7 +202,7 @@ async def receive(url, callback):
     The callback function should be quick and never error.
     """
 
-    async with websockets.connect(url) as websocket:
+    async with websockets.connect(url, max_size=None) as websocket:
         if not CONFIRM:
             pinger = asyncio.ensure_future(
                 keepalive(websocket),
