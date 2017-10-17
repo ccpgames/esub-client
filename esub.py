@@ -9,6 +9,7 @@ Options:
     --host HOST, -H HOST     esub server node [default: localhost]
     --port PORT, -P PORT     esub server port [default: 8090]
     --psub, -p               sub with a persistent sub
+    --prep, -r               rep with a persistent rep
     --timeout SECONDS        optional timeout to use
     --shared, -s             if the psub is shared
     --debug, -D              enable debugging, show stack traces
@@ -17,6 +18,7 @@ Options:
 
 import os
 import sys
+import json
 import time
 import asyncio
 import traceback
@@ -127,7 +129,7 @@ def sub(key, token=None, node=None, timeout=None):
     return res.content
 
 
-def rep(key, data, token=None, node=None, timeout=None):
+def rep(key, data, token=None, node=None, timeout=None, psub=False):
     """Reply to a sub.
 
     Args:
@@ -136,15 +138,20 @@ def rep(key, data, token=None, node=None, timeout=None):
         token: optional string token, fallback to ESUB_TOKEN
         node: optional specific node, fallback to ESUB_SERVICE_HOST
         timeout: optional POST timeout
+        psub: optional boolean to prefer sending to a psub
     """
 
     token = token or TOKEN
-    node = node_addr(node or CLUSTER)
 
-    if token is None:
-        url = "{}/rep/{}".format(node, key)
-    else:
-        url = "{}/rep/{}?token={}".format(node, key, token)
+    url = "{}/rep/{}{}{}".format(
+        node_addr(node or CLUSTER),
+        key,
+        "?" * int(bool(token or psub)),
+        "&".join(arg for arg in [
+            "token={}".format(token) if token else "",
+            "psub=1" if psub else "",
+        ] if arg),
+    )
 
     res = Cache.session.post(url, data=data, timeout=timeout)
     res.raise_for_status()
@@ -187,6 +194,37 @@ def psub(key, token=None, node=None, timeout=None, callback=None,
     loop.run_until_complete(asyncio.wait_for(receive(url, callback), timeout))
 
 
+def prep(key=None, token=None, node=None, psub=False, func=None, timeout=None,
+         loop=None, callback=None):
+    """Establish a persistent rep websocket connection.
+
+    Args:
+        key: sub ID to send all reps to
+        token: auth token to use with all reps
+        node: esub node to connect to
+        psub: boolean if all reps should send to psubs
+        func: function to call per message send, must return an
+              iterator of (key, token, psub, data) for each message.
+              can also be a tuple or a list to send all items as data.
+        timeout: optional integer seconds to timeout all publish calls with
+        loop: existing event loop to use, or calls asyncio.get_event_loop()
+        callback: callback function to run after confirmation. the
+                  function must accept two args, the confirmed data,
+                  and the reply data. both strings.
+    """
+
+    url = "{}://{}:{}/prep".format(WS_PROTOCOL, node or CLUSTER, PORT)
+    if hasattr(func, "__iter__"):
+        _iter = func
+        func = lambda: iter((key, token, psub, x) for x in _iter)
+
+    loop = loop or asyncio.get_event_loop()
+    loop.run_until_complete(asyncio.wait_for(
+        publish(url, func, sub=key, token=token, psub=psub, callback=callback),
+        timeout=timeout,
+    ))
+
+
 @asyncio.coroutine
 def keepalive(websocket):
     """Keep our websocket alive by sending unsolicited PONGs."""
@@ -194,6 +232,32 @@ def keepalive(websocket):
     while True:
         yield from asyncio.sleep(PING_FREQUENCY)
         yield from websocket.pong()
+
+
+async def publish(url, func, sub=None, token=None, psub=False, callback=None):
+    """Async websocket publish from the specified function."""
+
+    if callback is None:
+        callback = lambda x, y: print("{!r}: {}".format(x, y))
+
+    async with websockets.connect(url, max_size=None) as websocket:
+        try:
+            for msg_sub, msg_token, msg_psub, msg_data in func():
+
+                await websocket.send(json.dumps({
+                    "key": sub or msg_sub,
+                    "token": token or msg_token or TOKEN,
+                    "psub": psub or msg_psub,
+                    "data": msg_data,
+                }))
+
+                if CONFIRM:
+                    msg = await websocket.recv()
+                    callback(msg_data, msg)
+
+        except Exception:
+            websocket.close()
+            raise
 
 
 async def receive(url, callback):
@@ -255,15 +319,32 @@ def _cli(settings):
         kwargs["timeout"] = int(settings["--timeout"])
 
     if settings["--data"]:
-        if settings["--psub"]:
-            print("warning: redundant flag --psub provided")
+
+        kwargs["psub"] = settings["--psub"]
 
         if settings["--data"] == "-":
-            data = sys.stdin.read()
+            def _from_stdin():
+                while True:
+                    try:
+                        yield (
+                            settings["<key>"],
+                            settings["--token"],
+                            settings["--psub"],
+                            input(),
+                        )
+                    except (KeyboardInterrupt, EOFError):
+                        raise SystemExit
+
+            data = _from_stdin
+        elif settings["--prep"]:
+            data = settings["--data"].split(",")
         else:
             data = settings["--data"]
 
-        rep(settings["<key>"], data, **kwargs)
+        if settings["--prep"]:
+            prep(settings["<key>"], func=data, **kwargs)
+        else:
+            rep(settings["<key>"], data, **kwargs)
 
     elif settings["--psub"]:
         kwargs["shared"] = settings["--shared"]
